@@ -1,0 +1,6 @@
+# Test dependencies (no TensorFlow: the tests don't train the Keras models).
+numpy==2.5.3
+pandas==3.0.6
+scikit-learn==1.9.1
+imbalanced-learn==0.14.2
+pytest==9.1.1

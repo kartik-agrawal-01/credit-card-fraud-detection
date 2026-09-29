@@ -23,3 +23,7 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# OpenML download cache (python -m src.data)
+data/
+logs/

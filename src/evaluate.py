@@ -1,0 +1,121 @@
+"""Reproduce every number in the README: fit all models, tune thresholds on validation, score the test set once.
+
+Writes results/metrics.json, results/summary.md and images/pr_curves_test.png.
+
+Usage:
+    python -m src.evaluate                  # all six models (the two Keras models run on CPU)
+    python -m src.evaluate --models xgboost random_forest isolation_forest lof   # no TensorFlow needed
+"""
+import argparse
+import json
+import platform
+import time
+
+import numpy as np
+from sklearn.metrics import (average_precision_score, confusion_matrix, f1_score, precision_score, recall_score,
+                             roc_auc_score)
+
+from . import config
+from .train import DISPLAY, MODELS, run
+
+
+def test_metrics(y, scores, threshold) -> dict:
+    pred = (scores >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y, pred, labels=[0, 1]).ravel()
+    return {"auprc": float(average_precision_score(y, scores)), "roc_auc": float(roc_auc_score(y, scores)),
+            "f1": float(f1_score(y, pred, zero_division=0)),
+            "precision": float(precision_score(y, pred, zero_division=0)),
+            "recall": float(recall_score(y, pred, zero_division=0)),
+            "tp": int(tp), "fp": int(fp), "fn": int(fn), "tn": int(tn)}
+
+
+def versions() -> dict:
+    import imblearn
+    import sklearn
+    import xgboost
+
+    out = {"python": platform.python_version(), "numpy": np.__version__, "scikit-learn": sklearn.__version__,
+           "imbalanced-learn": imblearn.__version__, "xgboost": xgboost.__version__}
+    try:
+        import tensorflow as tf
+        out["tensorflow"] = tf.__version__
+    except ImportError:
+        pass
+    return out
+
+
+def plot_pr_curves(y, results, path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from sklearn.metrics import precision_recall_curve
+
+    fig, ax = plt.subplots(figsize=(7, 5), dpi=130)
+    for name, r in results.items():
+        p, rc, _ = precision_recall_curve(y, r["test_scores"])
+        ax.plot(rc, p, lw=1.8, label=f"{DISPLAY[name]} (AUPRC {r['test']['auprc']:.3f})")
+    ax.axhline(y.mean(), color="gray", ls=":", lw=1, label=f"Chance ({y.mean():.4f})")
+    ax.set(xlabel="Recall", ylabel="Precision", xlim=(0, 1), ylim=(0, 1.02),
+           title="Precision-recall on the held-out test set")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(fontsize=7.5, loc="lower left")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def summary_table(results) -> list[str]:
+    rows = ["| Model | AUPRC | ROC-AUC | F1 (fraud) | Precision | Recall | Threshold (from validation) |",
+            "|---|---|---|---|---|---|---|"]
+    for name, r in sorted(results.items(), key=lambda kv: -kv[1]["test"]["auprc"]):
+        t = r["test"]
+        rows.append(f"| {DISPLAY[name]} | {t['auprc']:.4f} | {t['roc_auc']:.4f} | {t['f1']:.4f} | "
+                    f"{t['precision']:.4f} | {t['recall']:.4f} | {r['threshold']:.4g} |")
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--models", nargs="+", choices=MODELS, default=MODELS)
+    args = parser.parse_args()
+
+    start = time.time()
+    p, results = run(args.models)
+    for r in results.values():
+        r["test"] = test_metrics(p.y_test, r["test_scores"], r["threshold"])
+        r["test_f1_at_0.5"] = (float(f1_score(p.y_test, (r["test_scores"] >= 0.5).astype(int)))
+                               if r["test_scores"].max() <= 1 and r["test_scores"].min() >= 0 else None)
+
+    extra = {}
+    if "xgboost" in results:
+        imp = results["xgboost"]["model"].feature_importances_
+        order = np.argsort(imp)[::-1][:5]
+        extra["xgboost_top_features"] = {p.feature_names[i]: round(float(imp[i]), 4) for i in order}
+
+    config.RESULTS_DIR.mkdir(exist_ok=True)
+    payload = {
+        "protocol": "stratified 60/20/20 train/val/test split (seed 42); features, scaler and SMOTE fitted on "
+                    "train only; thresholds maximise F1 on validation; test scored once",
+        "data": {"source": "OpenML 1597 (same data as Kaggle mlg-ulb/creditcardfraud)"
+                 if not config.KAGGLE_CSV.exists() else "creditcard.csv (Kaggle)",
+                 "rows": config.EXPECTED_ROWS, "fraud": config.EXPECTED_FRAUD, **p.info},
+        "models": {name: {"description": DISPLAY[name], "threshold": r["threshold"], "val_f1": r["val_f1"],
+                          "test": r["test"], "test_f1_at_0.5": r["test_f1_at_0.5"], "fit_seconds": r["fit_seconds"]}
+                   for name, r in results.items()},
+        **extra,
+        "versions": versions(),
+        "date": time.strftime("%Y-%m-%d"),
+        "total_seconds": round(time.time() - start, 1),
+    }
+    (config.RESULTS_DIR / "metrics.json").write_text(json.dumps(payload, indent=2) + "\n")
+    lines = ["# Results", "", "Generated by `python -m src.evaluate`. Test set: "
+             f"{p.info['rows']['test']:,} transactions, {p.info['fraud']['test']} frauds, scored once.", "",
+             *summary_table(results), ""]
+    (config.RESULTS_DIR / "summary.md").write_text("\n".join(lines))
+    config.IMAGES_DIR.mkdir(exist_ok=True)
+    plot_pr_curves(p.y_test, results, config.IMAGES_DIR / "pr_curves_test.png")
+    print("\n".join(lines))
+
+
+if __name__ == "__main__":
+    main()
