@@ -1,0 +1,10 @@
+# Versions not pinned in the original notebook (run on Google Colab, TensorFlow 2.19.0).
+numpy
+pandas
+matplotlib
+seaborn
+scikit-learn
+imbalanced-learn
+xgboost
+tensorflow>=2.19
+jupyter
